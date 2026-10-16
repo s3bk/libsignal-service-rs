@@ -6,7 +6,7 @@ use zkgroup::profiles::{ProfileKeyCommitment, ProfileKeyVersion};
 use crate::{
     content::ServiceError,
     push_service::response::SignalServiceResponse,
-    push_service::AvatarWrite,
+    push_service::{AttachmentV2UploadAttributes, AvatarWrite},
     utils::{serde_base64, serde_optional_base64},
     websocket::{self, account::DeviceCapabilities, SignalWebSocket},
 };
@@ -149,34 +149,31 @@ impl SignalWebSocket<websocket::Identified> {
             commitment: &commitment,
         };
 
-        // XXX this should  be a struct; cfr ProfileAvatarUploadAttributes
-        let upload_url: Result<String, _> = self
+        let request = self
             .http_request(Method::PUT, "/v1/profile")?
             .send_json(&command)
             .await?
             .service_error_for_status()
-            .await?
-            .json()
-            .await;
+            .await?;
 
-        match (upload_url, avatar) {
-            (_url, AvatarWrite::NewAvatar(_avatar)) => {
-                // FIXME
-                unreachable!("Uploading avatar unimplemented");
+        match avatar {
+            AvatarWrite::NewAvatar(avatar) => {
+                // The server answers with the S3-style form for CDN0.
+                let attributes: AttachmentV2UploadAttributes =
+                    request.json().await?;
+                let path = attributes.key.clone();
+                self.unidentified_push_service
+                    .upload_to_cdn0(
+                        "",
+                        attributes,
+                        "avatar".to_owned(),
+                        avatar,
+                    )
+                    .await?;
+                Ok(Some(path))
             },
-            // FIXME cleanup when #54883 is stable and MSRV:
-            // or-patterns syntax is experimental
-            // see issue #54883 <https://github.com/rust-lang/rust/issues/54883> for more information
-            (Err(_), AvatarWrite::RetainAvatar)
-            | (Err(_), AvatarWrite::NoAvatar) => {
+            AvatarWrite::RetainAvatar | AvatarWrite::NoAvatar => {
                 // OWS sends an empty string when there's no attachment
-                Ok(None)
-            },
-            (Ok(_resp), AvatarWrite::RetainAvatar)
-            | (Ok(_resp), AvatarWrite::NoAvatar) => {
-                tracing::warn!(
-                    "No avatar supplied but got avatar upload URL. Ignoring"
-                );
                 Ok(None)
             },
         }
